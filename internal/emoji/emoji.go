@@ -10,12 +10,20 @@ import (
 )
 
 type Item struct {
+	ID         discord.EmojiID
 	Name       string
 	InsertText string
 	Display    string
 	Custom     bool
 }
 
+// APIEmoji returns the formatted API emoji identifier for reactions.
+func (i Item) APIEmoji() discord.APIEmoji {
+	if i.Custom && i.ID.IsValid() {
+		return discord.NewAPIEmoji(i.ID, i.Name)
+	}
+	return discord.APIEmoji(i.InsertText)
+}
 type itemList []Item
 
 func (l itemList) String(i int) string {
@@ -56,6 +64,7 @@ func Search(query string, custom []discord.Emoji, limit int) []Item {
 	customItems := make([]Item, 0, len(custom))
 	for _, e := range custom {
 		customItems = append(customItems, Item{
+			ID:         e.ID,
 			Name:       e.Name,
 			InsertText: e.String(),
 			Display:    ":" + e.Name + ":",
