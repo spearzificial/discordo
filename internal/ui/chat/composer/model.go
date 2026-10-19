@@ -27,6 +27,7 @@ import (
 	"github.com/ayn2op/discordo/internal/consts"
 	"github.com/ayn2op/discordo/internal/ui"
 	"github.com/ayn2op/discordo/internal/ui/chat/commandslist"
+	"github.com/ayn2op/discordo/internal/ui/chat/emojislist"
 	"github.com/ayn2op/discordo/internal/ui/chat/mentionslist"
 	"github.com/ayn2op/ningen/v3"
 	"github.com/ayn2op/tview"
@@ -74,6 +75,7 @@ type Model struct {
 	memberSearchCache map[string]uint
 	mentionsList      mentionslist.Model
 	commandsList      commandslist.Model
+	emojisList        emojislist.Model
 	botCommands       []command.Item
 	lastSearch        time.Time
 
@@ -92,6 +94,7 @@ func NewModel(cfg *config.Config, state *ningen.State) Model {
 		memberSearchCache: make(map[string]uint),
 		mentionsList:      mentionslist.NewModel(cfg),
 		commandsList:      commandslist.NewModel(cfg),
+		emojisList:        emojislist.NewModel(cfg),
 	}
 	return c
 }
@@ -271,7 +274,7 @@ func (m Model) Update(msg tview.Msg) (Model, tview.Cmd) {
 			m.pasteText()
 			return m, pasteImage()
 		case keybind.Matches(msg, kbs.Send.Keybind):
-			if m.mentionsListVisible() || m.commandsListVisible() {
+			if m.mentionsListVisible() || m.emojisListVisible() || m.commandsListVisible() {
 				return m, m.tabComplete()
 			}
 			return m, m.send()
@@ -282,14 +285,14 @@ func (m Model) Update(msg tview.Msg) (Model, tview.Cmd) {
 			m.stopTabCompletion()
 			return m, m.pickFiles()
 		case keybind.Matches(msg, kbs.Cancel.Keybind):
-			if m.mentionsListVisible() || m.commandsListVisible() {
+			if m.mentionsListVisible() || m.emojisListVisible() || m.commandsListVisible() {
 				m.stopTabCompletion()
 				return m, nil
 			}
 			m.reset()
 			return m, nil
 		case keybind.Matches(msg, kbs.TabComplete.Keybind):
-			if m.mentionsListVisible() || m.commandsListVisible() {
+			if m.mentionsListVisible() || m.emojisListVisible() || m.commandsListVisible() {
 				return m, m.tabComplete()
 			}
 			m.insert("\t")
@@ -304,6 +307,10 @@ func (m Model) Update(msg tview.Msg) (Model, tview.Cmd) {
 	case mentionslist.Msg:
 		var cmd tview.Cmd
 		m.mentionsList, cmd = m.mentionsList.Update(msg)
+		return m, cmd
+	case emojislist.Msg:
+		var cmd tview.Cmd
+		m.emojisList, cmd = m.emojisList.Update(msg)
 		return m, cmd
 	case commandslist.Msg:
 		var cmd tview.Cmd
@@ -323,7 +330,7 @@ func (m Model) Update(msg tview.Msg) (Model, tview.Cmd) {
 func (m Model) canEditLastMessage() bool {
 	return !m.Disabled() && m.editing == nil && m.text == "" &&
 		m.sendMessageData.Reference == nil && len(m.sendMessageData.Files) == 0 &&
-		!m.mentionsListVisible() && !m.commandsListVisible()
+		!m.mentionsListVisible() && !m.emojisListVisible() && !m.commandsListVisible()
 }
 
 // StartEdit puts message in the composer to be edited.
@@ -437,6 +444,10 @@ func isMentionChar(r rune) bool {
 	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '.'
 }
 
+func isEmojiChar(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '+' || r == '-'
+}
+
 // suggestRecentAuthors suggests the authors of the channel's recent messages, other than the user.
 func (m *Model) suggestRecentAuthors(channel *discord.Channel) {
 	messages, err := m.state.Cabinet.Messages(channel.ID)
@@ -516,13 +527,16 @@ func (m Model) OnGuildMemberRemove(event *gateway.GuildMemberRemoveEvent) {
 	}
 }
 
-// AutocompleteView places the active completion list (mentions or commands) at the bottom of the area above the composer, near the cursor, or returns nil if none are active or the composer is not focused.
+// AutocompleteView places the active completion list (mentions, emojis, or commands) at the bottom of the area above the composer, near the cursor, or returns nil if none are active or the composer is not focused.
 func (m Model) AutocompleteView(focused bool) tview.Widget {
 	if !focused {
 		return nil
 	}
 	if m.commandsListVisible() {
 		return commandsPopup{m}
+	}
+	if m.emojisListVisible() {
+		return emojisPopup{m}
 	}
 	if m.mentionsListVisible() {
 		return mentionsPopup{m}
@@ -591,6 +605,33 @@ func (p commandsPopup) area(area tview.Rectangle) tview.Rectangle {
 	return tview.Rectangle{X: area.X + x, Y: area.Y + area.Height - size.Height, Width: size.Width, Height: size.Height}
 }
 
+type emojisPopup struct {
+	c Model
+}
+
+func (emojisPopup) Size() (width, height layout.Length) { return layout.Fill, layout.Fill }
+
+func (emojisPopup) Layout(limits layout.Limits) layout.Size {
+	return layout.Atomic(limits, layout.Fill, layout.Fill)
+}
+
+func (p emojisPopup) Draw(screen tview.Screen, area tview.Rectangle) {
+	p.c.emojisList.View().Draw(screen, p.area(area))
+}
+
+func (p emojisPopup) Handle(msg tview.Msg, area tview.Rectangle) tview.Msg {
+	return p.c.emojisList.View().Handle(msg, p.area(area))
+}
+
+func (p emojisPopup) area(area tview.Rectangle) tview.Rectangle {
+	c := p.c
+	size := c.emojisList.View().Layout(layout.Limits{Max: layout.Size{Width: area.Width, Height: area.Height}})
+	value, cursor := c.text, c.cursor
+	col := uucode.StringWidth(value[strings.LastIndex(value[:cursor], "\n")+1 : cursor])
+	x := min(c.box(false).InnerArea(tview.Rectangle{}).X+col, area.Width-size.Width)
+	return tview.Rectangle{X: area.X + x, Y: area.Y + area.Height - size.Height, Width: size.Width, Height: size.Height}
+}
+
 func (m *Model) addMentionMember(gID discord.GuildID, member *discord.Member) bool {
 	if member == nil {
 		return false
@@ -649,6 +690,7 @@ func (m *Model) addMentionUser(user *discord.User) {
 func (m *Model) stopTabCompletion() {
 	if m.cfg.AutocompleteLimit > 0 {
 		m.mentionsList.Clear()
+		m.emojisList.Clear()
 		m.commandsList.Clear()
 	}
 }
@@ -660,6 +702,10 @@ func (m Model) mentionsListVisible() bool {
 
 func (m Model) commandsListVisible() bool {
 	return m.commandsList.ItemCount() != 0
+}
+
+func (m Model) emojisListVisible() bool {
+	return m.emojisList.ItemCount() != 0
 }
 
 func (m Model) attach(name string, reader io.Reader) {
